@@ -1,3 +1,5 @@
+package idmap
+
 import (
 	"bytes"
 	"crypto/md5"
