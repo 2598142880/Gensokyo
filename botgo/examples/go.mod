@@ -1,10 +1,12 @@
 module examples
 
-go 1.17
+go 1.21.1
+
+toolchain go1.21.4
 
 require (
-	github.com/go-redis/redis/v8 v8.11.4
-	github.com/google/uuid v1.3.0
+	github.com/go-redis/redis/v8 v8.11.5
+	github.com/google/uuid v1.6.0
 	github.com/tencent-connect/botgo v0.0.0-00010101000000-000000000000
 	go.uber.org/zap v1.19.1
 	gopkg.in/yaml.v2 v2.4.0
@@ -20,8 +22,8 @@ require (
 	github.com/tidwall/pretty v1.2.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.7.0 // indirect
-	golang.org/x/net v0.0.0-20210428140749-89ef3d95e781 // indirect
-	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
+	golang.org/x/net v0.10.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace github.com/tencent-connect/botgo => ../

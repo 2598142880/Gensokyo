@@ -1,20 +1,23 @@
+package idmap
+
 import (
-	"bytes"
 	"crypto/md5"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
-
 	"github.com/go-redis/redis/v8"
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/hoshinonyaruko/gensokyo/structs"
 	"golang.org/x/net/context"
+	"log"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
 )
 
 var (
@@ -28,6 +31,12 @@ const (
 	RedisAddr       = "localhost:46379"
 	RedisPassword   = ""
 	RedisDB         = 0
+	DBName          = "idmap.db"
+	BucketName      = "ids"
+	CacheBucketName = "cache"
+	ConfigBucket    = "config"
+	UserInfoBucket  = "UserInfo"
+	CounterKey      = "currentRow"
 )
 
 var rdb *redis.Client
@@ -158,7 +167,6 @@ func GenerateRowID(id string, length int) (int64, error) {
 
 	return rowID, nil
 }
-
 
 func CheckValue(id string, value int64) bool {
 	// 计算int64值的长度
@@ -417,50 +425,59 @@ func SimplifiedStoreIDv2(id string) (int64, error) {
 	return SimplifiedStoreID(id)
 }
 
-// 群号 然后 用户号
+// StoreIDPro 群号 然后 用户号
 func StoreIDPro(id string, subid string) (int64, int64, error) {
 	var newRowID, newSubRowID int64
 	var err error
 
-	err = db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(BucketName))
+	// 生成正向键
+	forwardKey := fmt.Sprintf("%s:%s", id, subid)
 
-		// 生成正向键
-		forwardKey := fmt.Sprintf("%s:%s", id, subid)
-
-		// 检查正向键是否已经存在
-		existingForwardValue := b.Get([]byte(forwardKey))
-		if existingForwardValue != nil {
-			// 解析已存在的值
-			fmt.Sscanf(string(existingForwardValue), "%d:%d", &newRowID, &newSubRowID)
-			return nil
-		}
-
-		// 生成新的ID和SubID
-		newRowID, err = GenerateRowID(id, 9) // 使用GenerateRowID来生成
+	// 检查正向键是否已经存在
+	exists, err := rdb.Exists(ctx, forwardKey).Result()
+	if err != nil {
+		return 0, 0, err
+	}
+	if exists > 0 {
+		// 获取已存在的值
+		existingForwardValue, err := rdb.Get(ctx, forwardKey).Result()
 		if err != nil {
-			return err
+			return 0, 0, err
 		}
+		// 解析已存在的值
+		fmt.Sscanf(existingForwardValue, "%d:%d", &newRowID, &newSubRowID)
+		return newRowID, newSubRowID, nil
+	}
 
-		newSubRowID, err = GenerateRowID(subid, 9) // 同样的方法生成SubID
-		if err != nil {
-			return err
-		}
-		//反向键
-		reverseKey := fmt.Sprintf("%d:%d", newRowID, newSubRowID)
-		//正向值
-		forwardValue := fmt.Sprintf("%d:%d", newRowID, newSubRowID)
-		//反向值
-		reverseValue := fmt.Sprintf("%s:%s", id, subid)
+	// 生成新的ID和SubID
+	newRowID, err = GenerateRowID(id, 9) // 使用GenerateRowID来生成
+	if err != nil {
+		return 0, 0, err
+	}
 
-		// 存储正向键和反向键
-		b.Put([]byte(forwardKey), []byte(forwardValue))
-		b.Put([]byte(reverseKey), []byte(reverseValue))
+	newSubRowID, err = GenerateRowID(subid, 9) // 同样的方法生成SubID
+	if err != nil {
+		return 0, 0, err
+	}
 
-		return nil
-	})
+	// 反向键
+	reverseKey := fmt.Sprintf("%d:%d", newRowID, newSubRowID)
+	// 正向值
+	forwardValue := fmt.Sprintf("%d:%d", newRowID, newSubRowID)
+	// 反向值
+	reverseValue := fmt.Sprintf("%s:%s", id, subid)
 
-	return newRowID, newSubRowID, err
+	// 存储正向键和反向键
+	err = rdb.Set(ctx, forwardKey, forwardValue, 0).Err()
+	if err != nil {
+		return 0, 0, err
+	}
+	err = rdb.Set(ctx, reverseKey, reverseValue, 0).Err()
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return newRowID, newSubRowID, nil
 }
 
 // StoreIDv2 根据a储存b
@@ -596,7 +613,7 @@ func StoreIDv2Pro(id string, subid string) (int64, int64, error) {
 
 // 根据b得到a
 func RetrieveRowByID(rowid string) (string, error) {
-	id, err := rdb.HGet(ctx, BucketName, "row-" + rowid).Result()
+	id, err := rdb.HGet(ctx, BucketName, "row-"+rowid).Result()
 	if err == redis.Nil {
 		return "", ErrKeyNotFound
 	}
@@ -604,7 +621,7 @@ func RetrieveRowByID(rowid string) (string, error) {
 }
 
 func RetrieveRowByCache(rowid string) (string, error) {
-	id, err := rdb.HGet(ctx, CacheBucketName, "row-" + rowid).Result()
+	id, err := rdb.HGet(ctx, CacheBucketName, "row-"+rowid).Result()
 	if err == redis.Nil {
 		return "", ErrKeyNotFound
 	}
@@ -822,8 +839,7 @@ func ReadConfig(sectionName, keyName string) (string, error) {
 	return result, nil
 }
 
-
-// DeleteConfig根据sectionName和keyName删除指定的键值对
+// DeleteConfig DeleteConfig根据sectionName和keyName删除指定的键值对
 func DeleteConfig(sectionName, keyName string) error {
 	key := joinSectionAndKey(sectionName, keyName)
 	err := rdb.HDel(ctx, ConfigBucket, key).Err()
@@ -832,7 +848,6 @@ func DeleteConfig(sectionName, keyName string) error {
 	}
 	return nil
 }
-
 
 // DeleteConfigv2 根据sectionName和keyName远程删除配置
 func DeleteConfigv2(sectionName, keyName string) error {
@@ -876,7 +891,7 @@ func DeleteConfigv2(sectionName, keyName string) error {
 }
 
 // ReadConfigv2 根据a和b取出c
-func DeleteConfigv2(sectionName, keyName string) error {
+func ReadConfigv2(sectionName, keyName string) error {
 	// 根据portValue确定协议
 	protocol := "http"
 	portValue := config.GetPortValue()
@@ -1144,7 +1159,7 @@ func RetrieveVirtualValuev2Pro(realValue string, realValueSub string) (string, s
 	return RetrieveVirtualValuePro(realValue, realValueSub)
 }
 
-// UpdateVirtualValue 更新旧的虚拟值到新的虚拟值的映射
+/*// UpdateVirtualValue 更新旧的虚拟值到新的虚拟值的映射
 func UpdateVirtualValue(oldRowValue, newRowValue int64) error {
 	oldRowKey := fmt.Sprintf("row-%d", oldRowValue)
 	newRowKey := fmt.Sprintf("row-%d", newRowValue)
@@ -1185,9 +1200,9 @@ func UpdateVirtualValue(oldRowValue, newRowValue int64) error {
 	})
 
 	return err
-}
+}*/
 
-// RetrieveRealValue 根据虚拟值获取真实值，并返回虚拟值及其对应的真实值
+/*// RetrieveRealValue 根据虚拟值获取真实值，并返回虚拟值及其对应的真实值
 func RetrieveRealValue(virtualValue int64) (string, string, error) {
 	virtualKey := fmt.Sprintf("row-%d", virtualValue)
 	realValue, err := rdb.Get(ctx, virtualKey).Result()
@@ -1199,9 +1214,9 @@ func RetrieveRealValue(virtualValue int64) (string, string, error) {
 
 	// 返回虚拟值和对应的真实值
 	return fmt.Sprintf("%d", virtualValue), realValue, nil
-}
+}*/
 
-// RetrieveVirtualValue 根据真实值获取虚拟值，并返回真实值及其对应的虚拟值
+/*// RetrieveVirtualValue 根据真实值获取虚拟值，并返回真实值及其对应的虚拟值
 func RetrieveVirtualValue(realValue string) (string, string, error) {
 	virtualValueBytes, err := rdb.Get(ctx, realValue).Bytes()
 	if err == redis.Nil {
@@ -1214,9 +1229,9 @@ func RetrieveVirtualValue(realValue string) (string, string, error) {
 
 	// 返回真实值和对应的虚拟值
 	return realValue, fmt.Sprintf("%d", virtualValue), nil
-}
+}*/
 
-// RetrieveVirtualValuePro 根据2个真实值获取2个虚拟值
+/*// RetrieveVirtualValuePro 根据2个真实值获取2个虚拟值
 func RetrieveVirtualValuePro(realValue string, realValueSub string) (string, string, error) {
 	// 拼接主键和子键
 	key := fmt.Sprintf("%s:%s", realValue, realValueSub)
@@ -1231,7 +1246,8 @@ func RetrieveVirtualValuePro(realValue string, realValueSub string) (string, str
 
 	// 返回主键和子键对应的虚拟值
 	return realValue, virtualValue, nil
-}
+}*/
+
 // 根据2个真实值 获取2个虚拟值 群号 然后 用户号
 func RetrieveVirtualValuePro(realValue string, realValueSub string) (string, string, error) {
 	forwardKey := fmt.Sprintf("%s:%s", realValue, realValueSub)
@@ -1394,6 +1410,7 @@ func UpdateVirtualValuev2Pro(oldVirtualValue1, newVirtualValue1, oldVirtualValue
 
 	return UpdateVirtualValuePro(oldVirtualValue1, newVirtualValue1, oldVirtualValue2, newVirtualValue2)
 }
+
 // sub 要匹配的类型 typesuffix 相当于:type 的type
 func FindKeysBySubAndType(sub string, typeSuffix string) ([]string, error) {
 	var ids []string
