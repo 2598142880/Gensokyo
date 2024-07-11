@@ -1,5 +1,3 @@
-package idmap
-
 import (
 	"bytes"
 	"crypto/md5"
@@ -260,64 +258,64 @@ func StoreID(id string) (int64, error) {
 }
 
 // 根据a储存b
-func StoreCache(id string) (int64, error) \{
+func StoreCache(id string) (int64, error) {
 	var newRow int64
 
 	// 使用Redis事务来保证数据一致性
-	err := rdb.Watch(ctx, func(tx *redis.Tx) error \{
+	err := rdb.Watch(ctx, func(tx *redis.Tx) error {
 		// 检查ID是否已经存在
 		existingRowStr, err := tx.HGet(ctx, CacheBucketName, id).Result()
-		if err == nil \{
+		if err == nil {
 			newRow, err = strconv.ParseInt(existingRowStr, 10, 64)
-			if err != nil \{
+			if err != nil {
 				return err
 			}
 			return nil
 		}
 
-		if !config.GetHashIDValue() \{
+		if !config.GetHashIDValue() {
 			// 如果ID不存在，则为它分配一个新的行号 数字递增
 			currentRowStr, err := tx.Get(ctx, CounterKey).Result()
-			if err == redis.Nil \{
+			if err == redis.Nil {
 				newRow = 1
-			} else if err != nil \{
+			} else if err != nil {
 				return err
-			} else \{
+			} else {
 				currentRow, err := strconv.ParseInt(currentRowStr, 10, 64)
-				if err != nil \{
+				if err != nil {
 					return err
 				}
 				newRow = currentRow + 1
 			}
-		} else \{
+		} else {
 			// 生成新的行号
 			var err error
 			maxDigits := 18 // int64的位数上限-1
-			for digits := 9; digits <= maxDigits; digits++ \{
+			for digits := 9; digits <= maxDigits; digits++ {
 				newRow, err = GenerateRowID(id, digits)
-				if err != nil \{
+				if err != nil {
 					return err
 				}
 				// 检查新生成的行号是否重复
 				rowKey := fmt.Sprintf("row-%d", newRow)
 				exists, err := tx.HExists(ctx, CacheBucketName, rowKey).Result()
-				if err != nil \{
+				if err != nil {
 					return err
 				}
-				if !exists \{
+				if !exists {
 					// 找到了一个唯一的行号，可以跳出循环
 					break
 				}
 				// 如果到达了最大尝试次数还没有找到唯一的行号，则返回错误
-				if digits == maxDigits \{
+				if digits == maxDigits {
 					return fmt.Errorf("unable to find a unique row ID after %d attempts", maxDigits-8)
 				}
 			}
 		}
 
 		// 使用事务来写入数据
-		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error \{
-			if !config.GetHashIDValue() \{
+		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			if !config.GetHashIDValue() {
 				pipe.Set(ctx, CounterKey, newRow, 0)
 			}
 			pipe.HSet(ctx, CacheBucketName, id, newRow)
@@ -331,43 +329,43 @@ func StoreCache(id string) (int64, error) \{
 	return newRow, err
 }
 
-func SimplifiedStoreID(id string) (int64, error) \{
+func SimplifiedStoreID(id string) (int64, error) {
 	var newRow int64
 
 	// 使用Redis事务来保证数据一致性
-	err := rdb.Watch(ctx, func(tx *redis.Tx) error \{
+	err := rdb.Watch(ctx, func(tx *redis.Tx) error {
 		// 生成新的行号
 		var err error
 		newRow, err = GenerateRowID(id, 9)
-		if err != nil \{
+		if err != nil {
 			return err
 		}
 
 		// 检查新生成的行号是否重复
 		rowKey := fmt.Sprintf("row-%d", newRow)
 		exists, err := tx.HExists(ctx, BucketName, rowKey).Result()
-		if err != nil \{
+		if err != nil {
 			return err
 		}
-		if exists \{
+		if exists {
 			// 如果行号重复，使用10位数字生成行号
 			newRow, err = GenerateRowID(id, 10)
-			if err != nil \{
+			if err != nil {
 				return err
 			}
 			rowKey = fmt.Sprintf("row-%d", newRow)
 			// 再次检查重复性，如果还是重复，则返回错误
 			exists, err = tx.HExists(ctx, BucketName, rowKey).Result()
-			if err != nil \{
+			if err != nil {
 				return err
 			}
-			if exists \{
+			if exists {
 				return fmt.Errorf("unable to find a unique row ID 195")
 			}
 		}
 
 		// 只写入反向键
-		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error \{
+		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 			pipe.HSet(ctx, BucketName, rowKey, id)
 			return nil
 		})
@@ -378,37 +376,37 @@ func SimplifiedStoreID(id string) (int64, error) \{
 	return newRow, err
 }
 
-func SimplifiedStoreIDv2(id string) (int64, error) \{
-	if config.GetLotusValue() && !config.GetLotusWithoutIdmaps() \{
+func SimplifiedStoreIDv2(id string) (int64, error) {
+	if config.GetLotusValue() && !config.GetLotusWithoutIdmaps() {
 		// 使用网络请求方式
 		serverDir := config.GetServer_dir()
 		portValue := config.GetPortValue()
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" \{
+		if portValue == "443" {
 			protocol = "https"
 		}
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=13&id=%s", protocol, serverDir, portValue, id)
 		resp, err := http.Get(url)
-		if err != nil \{
+		if err != nil {
 			return 0, fmt.Errorf("failed to send request: %v", err)
 		}
 		defer resp.Body.Close()
 
 		// 解析响应
-		var response map[string]interface\{}
-		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil \{
+		var response map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 			return 0, fmt.Errorf("failed to decode response: %v", err)
 		}
-		if resp.StatusCode != http.StatusOK \{
+		if resp.StatusCode != http.StatusOK {
 			return 0, fmt.Errorf("error response from server: %s", response["error"])
 		}
 
 		rowValue, ok := response["row"].(float64)
-		if !ok \{
+		if !ok {
 			return 0, fmt.Errorf("invalid response format")
 		}
 
@@ -1397,22 +1395,22 @@ func UpdateVirtualValuev2Pro(oldVirtualValue1, newVirtualValue1, oldVirtualValue
 	return UpdateVirtualValuePro(oldVirtualValue1, newVirtualValue1, oldVirtualValue2, newVirtualValue2)
 }
 // sub 要匹配的类型 typesuffix 相当于:type 的type
-func FindKeysBySubAndType(sub string, typeSuffix string) ([]string, error) \{
+func FindKeysBySubAndType(sub string, typeSuffix string) ([]string, error) {
 	var ids []string
 
 	// 获取所有键
 	keys, err := rdb.Keys(ctx, "*").Result()
-	if err != nil \{
+	if err != nil {
 		return nil, err
 	}
 
-	for _, key := range keys \{
+	for _, key := range keys {
 		value, err := rdb.Get(ctx, key).Result()
-		if err != nil \{
+		if err != nil {
 			continue
 		}
 
-		if strings.HasSuffix(key, typeSuffix) && value == sub \{
+		if strings.HasSuffix(key, typeSuffix) && value == sub {
 			id := strings.Split(key, ":")[0]
 			ids = append(ids, id)
 		}
@@ -1422,19 +1420,19 @@ func FindKeysBySubAndType(sub string, typeSuffix string) ([]string, error) \{
 }
 
 // 取相同前缀下的所有key的:后边 比如取群成员列表
-func FindSubKeysById(id string) ([]string, error) \{
+func FindSubKeysById(id string) ([]string, error) {
 	var subKeys []string
 	prefix := id + ":"
 
 	// 获取所有键
 	keys, err := rdb.Keys(ctx, prefix+"*").Result()
-	if err != nil \{
+	if err != nil {
 		return nil, err
 	}
 
-	for _, key := range keys \{
+	for _, key := range keys {
 		parts := strings.Split(key, ":")
-		if len(parts) == 2 \{
+		if len(parts) == 2 {
 			subKeys = append(subKeys, parts[1])
 		}
 	}
@@ -1443,46 +1441,46 @@ func FindSubKeysById(id string) ([]string, error) \{
 }
 
 // FindSubKeysByIdPro 根据1个值获取key中的k:v给出k获取所有v，通过网络调用
-func FindSubKeysByIdPro(id string) ([]string, error) \{
-	if config.GetLotusValue() && !config.GetLotusWithoutIdmaps() \{
+func FindSubKeysByIdPro(id string) ([]string, error) {
+	if config.GetLotusValue() && !config.GetLotusWithoutIdmaps() {
 		// 使用网络请求方式
 		serverDir := config.GetServer_dir()
 		portValue := config.GetPortValue()
 
 		// 根据portValue确定协议
 		protocol := "http"
-		if portValue == "443" \{
+		if portValue == "443" {
 			protocol = "https"
 		}
 
 		// 构建请求URL
 		url := fmt.Sprintf("%s://%s:%s/getid?type=14&id=%s", protocol, serverDir, portValue, id)
 		resp, err := http.Get(url)
-		if err != nil \{
+		if err != nil {
 			return nil, fmt.Errorf("failed to send request: %v", err)
 		}
 		defer resp.Body.Close()
 
 		// 解析响应
-		var response map[string]interface\{}
-		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil \{
+		var response map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 			return nil, fmt.Errorf("failed to decode response: %v", err)
 		}
-		if resp.StatusCode != http.StatusOK \{
+		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("error response from server: %s", response["error"])
 		}
 
-		keys, ok := response["keys"].([]interface\{})
-		if !ok \{
+		keys, ok := response["keys"].([]interface{})
+		if !ok {
 			return nil, fmt.Errorf("invalid response format for keys")
 		}
 
-		// 将interface\{}类型的keys转换为[]string
+		// 将interface{}类型的keys转换为[]string
 		var resultKeys []string
-		for _, key := range keys \{
-			if strKey, ok := key.(string); ok \{
+		for _, key := range keys {
+			if strKey, ok := key.(string); ok {
 				resultKeys = append(resultKeys, strKey)
-			} else \{
+			} else {
 				return nil, fmt.Errorf("invalid key format in response")
 			}
 		}
@@ -1495,18 +1493,18 @@ func FindSubKeysByIdPro(id string) ([]string, error) \{
 }
 
 // 场景: xxx:yyy zzz:bbb  zzz:bbb xxx:yyy 把xxx(id)替换为newID 比如更换群号(会卡住)
-func UpdateKeysWithNewID(id, newID string) error \{
+func UpdateKeysWithNewID(id, newID string) error {
 	// 获取所有以id开头的键
 	keys, err := rdb.Keys(ctx, id+":*").Result()
-	if err != nil \{
+	if err != nil {
 		return err
 	}
 
 	// 开始事务
-	_, err = rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error \{
-		for _, key := range keys \{
+	_, err = rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		for _, key := range keys {
 			value, err := rdb.Get(ctx, key).Result()
-			if err != nil \{
+			if err != nil {
 				return err
 			}
 
@@ -1515,21 +1513,21 @@ func UpdateKeysWithNewID(id, newID string) error \{
 
 			// 获取原反向键的值
 			reverseValue, err := rdb.Get(ctx, reverseKey).Result()
-			if err != nil \{
+			if err != nil {
 				return err
 			}
 
 			// 更新原键
-			if err := rdb.Del(ctx, key).Err(); err != nil \{
+			if err := rdb.Del(ctx, key).Err(); err != nil {
 				return err
 			}
-			if err := rdb.Set(ctx, newKey, reverseKey, 0).Err(); err != nil \{
+			if err := rdb.Set(ctx, newKey, reverseKey, 0).Err(); err != nil {
 				return err
 			}
 
 			// 更新反向键的值
 			newReverseValue := strings.Replace(reverseValue, id, newID, 1)
-			if err := rdb.Set(ctx, reverseKey, newReverseValue, 0).Err(); err != nil \{
+			if err := rdb.Set(ctx, reverseKey, newReverseValue, 0).Err(); err != nil {
 				return err
 			}
 		}
@@ -1540,26 +1538,26 @@ func UpdateKeysWithNewID(id, newID string) error \{
 }
 
 // StoreUserInfo 存储用户信息
-func StoreUserInfo(rawID string, userInfo structs.FriendData) error \{
+func StoreUserInfo(rawID string, userInfo structs.FriendData) error {
 	key := fmt.Sprintf("%s:%s", rawID, userInfo.UserID) // 创建复合键
 
 	// 检查是否存在重复键
 	exists, err := rdb.Exists(ctx, key).Result()
-	if err != nil \{
+	if err != nil {
 		return err
 	}
-	if exists > 0 \{
+	if exists > 0 {
 		return fmt.Errorf("duplicate key: %s", key)
 	}
 
 	// 序列化用户信息作为值
 	value, err := json.Marshal(userInfo)
-	if err != nil \{
+	if err != nil {
 		return fmt.Errorf("could not encode user info: %s", err)
 	}
 
 	// 存储键值对
-	if err := rdb.Set(ctx, key, value, 0).Err(); err != nil \{
+	if err := rdb.Set(ctx, key, value, 0).Err(); err != nil {
 		return fmt.Errorf("could not store user info: %s", err)
 	}
 
