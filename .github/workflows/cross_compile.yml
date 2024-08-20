@@ -30,8 +30,6 @@ jobs:
             goarch: amd64
           - os: windows
             goarch: 386
-          - os: android
-            goarch: arm64
           # ... Add other combinations as needed
 
     steps:
