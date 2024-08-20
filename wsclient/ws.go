@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -15,6 +16,7 @@ import (
 	"github.com/hoshinonyaruko/gensokyo/config"
 	"github.com/hoshinonyaruko/gensokyo/mylog"
 	"github.com/tencent-connect/botgo/openapi"
+	"github.com/gammazero/workerpool"
 )
 
 type WebSocketClient struct {
@@ -25,9 +27,13 @@ type WebSocketClient struct {
 	urlStr         string
 	cancel         context.CancelFunc
 	isReconnecting bool
-	sendFailures   []map[string]interface{} // 存储失败的消息
-	writeCh        chan writeRequest        // 写请求通道
-	closeCh        chan struct{}            // 用于关闭的通道
+	sendFailures   []map[string]interface{}
+	writeCh        chan writeRequest
+	closeCh        chan struct{}
+	workerPool     *workerpool.WorkerPool
+	batchSize      int
+	batchTimeout   time.Duration
+	mutex          sync.Mutex
 }
 
 type writeRequest struct {
@@ -37,23 +43,63 @@ type writeRequest struct {
 
 // SendMessage 发送消息，将写请求发送到写 Goroutine
 func (client *WebSocketClient) SendMessage(message map[string]interface{}) error {
-	// 序列化消息
 	msgBytes, err := json.Marshal(message)
 	if err != nil {
 		log.Println("Error marshalling message:", err)
 		return err
 	}
-
-	// 创建错误通道，用于接收写操作的结果
-	client.writeCh <- writeRequest{
-		messageType: websocket.TextMessage,
-		data:        msgBytes,
-	}
-
-	// 等待写操作完成，并返回结果
+	
+	client.workerPool.Submit(func() {
+		select {
+		case client.writeCh <- writeRequest{messageType: websocket.TextMessage, data: msgBytes}:
+		default:
+			log.Println("Write channel is full, message dropped")
+		}
+	})
+	
 	return nil
 }
 
+func (client *WebSocketClient) startBatchWriter() {
+	var batch []writeRequest
+	timer := time.NewTimer(client.batchTimeout)
+
+	for {
+		select {
+		case req := <-client.writeCh:
+			batch = append(batch, req)
+			if len(batch) >= client.batchSize {
+				client.sendBatch(batch)
+				batch = batch[:0]
+				timer.Reset(client.batchTimeout)
+			}
+		case <-timer.C:
+			if len(batch) > 0 {
+				client.sendBatch(batch)
+				batch = batch[:0]
+			}
+			timer.Reset(client.batchTimeout)
+		case <-client.closeCh:
+			return
+		}
+	}
+}
+
+
+func (client *WebSocketClient) sendBatch(batch []writeRequest) {
+	client.mutex.Lock()
+	defer client.mutex.Unlock()
+
+	for _, req := range batch {
+		err := client.conn.WriteMessage(req.messageType, req.data)
+		if err != nil {
+			log.Println("Error sending message:", err)
+			if !config.GetDisableErrorChan() {
+				client.sendFailures = append(client.sendFailures, map[string]interface{}{"message": req.data})
+			}
+		}
+	}
+}
 // Close 关闭 WebSocketClient，停止写 Goroutine
 func (client *WebSocketClient) Close() error {
 	close(client.closeCh)
@@ -87,14 +133,16 @@ func (client *WebSocketClient) handleIncomingMessages(cancel context.CancelFunc)
 		_, msg, err := client.conn.ReadMessage()
 		if err != nil {
 			mylog.Println("WebSocket connection closed:", err)
-			cancel() // 取消心跳 goroutine
+			cancel()
 			if !client.isReconnecting {
 				go client.Reconnect()
 			}
-			return // 退出循环，不再尝试读取消息
+			return
 		}
 
-		go client.recvMessage(msg)
+		client.workerPool.Submit(func() {
+			client.recvMessage(msg)
+		})
 	}
 }
 
@@ -308,7 +356,9 @@ func NewWebSocketClient(urlStr string, botID uint64, api openapi.OpenAPI, apiv2 
 	if token != "" {
 		headers["Authorization"] = []string{"Token " + token}
 	}
+
 	mylog.Printf("准备使用token[%s]连接到[%s]\n", token, urlStr)
+
 	dialer := websocket.Dialer{
 		Proxy:            http.ProxyFromEnvironment,
 		HandshakeTimeout: 45 * time.Second,
@@ -328,12 +378,13 @@ func NewWebSocketClient(urlStr string, botID uint64, api openapi.OpenAPI, apiv2 
 				return nil, err
 			}
 			mylog.Printf("Failed to connect to WebSocket[%v]: %v, retrying in 5 seconds...\n", urlStr, err)
-			time.Sleep(5 * time.Second) // sleep for 5 seconds before retrying
+			time.Sleep(5 * time.Second)
 		} else {
-			mylog.Printf("Successfully connected to %s.\n", urlStr) // 输出连接成功提示
-			break                                                   // successfully connected, break the loop
+			mylog.Printf("Successfully connected to %s.\n", urlStr)
+			break
 		}
 	}
+
 	client := &WebSocketClient{
 		conn:         conn,
 		api:          api,
@@ -341,12 +392,17 @@ func NewWebSocketClient(urlStr string, botID uint64, api openapi.OpenAPI, apiv2 
 		botID:        botID,
 		urlStr:       urlStr,
 		sendFailures: []map[string]interface{}{},
-		writeCh:      make(chan writeRequest, 5000), // 缓冲区大小可以根据需求调整
+		writeCh:      make(chan writeRequest, 50000), // 增加缓冲区大小
 		closeCh:      make(chan struct{}),
+		workerPool:   workerpool.New(100),            // 创建工作池
+		batchSize:    1000,                           // 批量大小
+		batchTimeout: 100 * time.Millisecond,         // 批量超时
 	}
-	go client.startWriter() // 启动写 Goroutine
 
-	// Sending initial message similar to your setupB function
+	go client.startWriter()    // 启动写 Goroutine
+	go client.startBatchWriter() // 启动批量写入 Goroutine
+
+	// 发送初始消息
 	message := map[string]interface{}{
 		"meta_event_type": "lifecycle",
 		"post_type":       "meta_event",
@@ -359,16 +415,14 @@ func NewWebSocketClient(urlStr string, botID uint64, api openapi.OpenAPI, apiv2 
 
 	err = client.SendMessage(message)
 	if err != nil {
-		// handle error
 		mylog.Printf("Error sending message: %v\n", err)
 	}
 
-	// Starting goroutine for heartbeats and another for listening to messages
+	// 启动心跳和消息处理 goroutines
 	ctx, cancel := context.WithCancel(context.Background())
-
 	client.cancel = cancel
-	heartbeatinterval := config.GetHeartBeatInterval()
-	go client.sendHeartbeat(ctx, botID, heartbeatinterval)
+	heartbeatInterval := config.GetHeartBeatInterval()
+	go client.sendHeartbeat(ctx, botID, heartbeatInterval)
 	go client.handleIncomingMessages(cancel)
 
 	return client, nil
